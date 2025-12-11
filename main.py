@@ -7,17 +7,6 @@ import datetime
 import time
 import sys
 import threading
-import logging
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('bot_errors.log'),
-        logging.StreamHandler()
-    ]
-)
 
 # --- Configuration ---
 SYMBOL = "BTC" 
@@ -418,83 +407,65 @@ def update_strategy(closed_df):
 def on_candle_update(msg):
     global df_history, latest_candle_cache
     
-    try:
-        data = msg.get('data', {})
-        if not data: 
-            logging.warning("Received empty data in websocket message")
-            return
-        
-        # Data format from WS: {'t': 1733837400000, 'T': 1733837699999, 's': 'BTC', 'i': '5m', 'o': 98000.0, 'c': 98100.0, 'h': 98200.0, 'l': 97900.0, 'v': 100.0, 'n': 10}
-        # We rely on 't' (start time) to detect new candle
-        
-        new_t = data['t']
-        close_price = float(data['c'])
-        open_price = float(data['o'])
-        high_price = float(data['h'])
-        low_price = float(data['l'])
-        volume = float(data['v'])
-        
-        # If this is the first message or a continuation of the same candle
-        if latest_candle_cache is None:
-            latest_candle_cache = data
-            return
+    data = msg.get('data', {})
+    if not data: return
+    
+    # Data format from WS: {'t': 1733837400000, 'T': 1733837699999, 's': 'BTC', 'i': '5m', 'o': 98000.0, 'c': 98100.0, 'h': 98200.0, 'l': 97900.0, 'v': 100.0, 'n': 10}
+    # We rely on 't' (start time) to detect new candle
+    
+    new_t = data['t']
+    close_price = float(data['c'])
+    open_price = float(data['o'])
+    high_price = float(data['h'])
+    low_price = float(data['l'])
+    volume = float(data['v'])
+    
+    # If this is the first message or a continuation of the same candle
+    if latest_candle_cache is None:
+        latest_candle_cache = data
+        return
 
-        last_t = latest_candle_cache['t']
+    last_t = latest_candle_cache['t']
+    
+    if new_t > last_t:
+        # The previous candle (last_t) is now closed.
+        # We must finalize it and add it to df_history
+        final_candle = latest_candle_cache
+        ts = pd.to_datetime(final_candle['t'], unit='ms')
         
-        if new_t > last_t:
-            # The previous candle (last_t) is now closed.
-            # We must finalize it and add it to df_history
-            final_candle = latest_candle_cache
-            ts = pd.to_datetime(final_candle['t'], unit='ms')
-            
-            # Adding to DataFrame
-            row = pd.DataFrame([{
-                'open': float(final_candle['o']),
-                'high': float(final_candle['h']),
-                'low': float(final_candle['l']),
-                'close': float(final_candle['c']),
-                'volume': float(final_candle['v'])
-            }], index=[ts])
-            
-            df_history = pd.concat([df_history, row])
-            # Ensure we don't grow infinitely, keep last 1000
-            if len(df_history) > 1000:
-                df_history = df_history.iloc[-1000:]
-                
-            print(f"--- Candle Closed: {ts} | Close: {final_candle['c']} ---")
-            update_strategy(df_history)
-            
-            latest_candle_cache = data
-        else:
-            # Same candle updating
-            latest_candle_cache = data
+        # Adding to DataFrame
+        row = pd.DataFrame([{
+            'open': float(final_candle['o']),
+            'high': float(final_candle['h']),
+            'low': float(final_candle['l']),
+            'close': float(final_candle['c']),
+            'volume': float(final_candle['v'])
+        }], index=[ts])
         
-    except Exception as e:
-        logging.error(f"Error in on_candle_update: {str(e)}", exc_info=True)
+        df_history = pd.concat([df_history, row])
+        # Ensure we don't grow infinitely, keep last 1000
+        if len(df_history) > 1000:
+            df_history = df_history.iloc[-1000:]
+            
+        print(f"--- Candle Closed: {ts} | Close: {final_candle['c']} ---")
+        update_strategy(df_history)
+        
+        latest_candle_cache = data
+    else:
+        # Same candle updating
+        latest_candle_cache = data
 
 def main():
     global df_history
     
     print("Initializing Live BTC Scalper...")
-    logging.info("Starting Live BTC Scalper")
-    
-    try:
-        info = Info(constants.MAINNET_API_URL, skip_ws=False)
-    except Exception as e:
-        logging.error(f"Failed to initialize Info object: {str(e)}", exc_info=True)
-        print(f"ERROR: Failed to connect to Hyperliquid API: {e}")
-        return
+    info = Info(constants.MAINNET_API_URL, skip_ws=False)
     
     # 1. Fetch History
     print("Fetching initial history...")
-    try:
-        end_time = int(datetime.datetime.now().timestamp() * 1000)
-        start_time = end_time - (1000 * 60 * 5 * 500) # 500 candles
-        candles = info.candles_snapshot(name=SYMBOL, interval=TIMEFRAME, startTime=start_time, endTime=end_time)
-    except Exception as e:
-        logging.error(f"Failed to fetch initial history: {str(e)}", exc_info=True)
-        print(f"ERROR: Failed to fetch candle history: {e}")
-        return
+    end_time = int(datetime.datetime.now().timestamp() * 1000)
+    start_time = end_time - (1000 * 60 * 5 * 500) # 500 candles
+    candles = info.candles_snapshot(name=SYMBOL, interval=TIMEFRAME, startTime=start_time, endTime=end_time)
     
     df = pd.DataFrame(candles)
     if not df.empty:
@@ -513,32 +484,16 @@ def main():
     
     # 2. Subscribe
     print(f"Subscribing to {SYMBOL} {TIMEFRAME} candles...")
-    try:
-        subscription = {"type": "candle", "coin": SYMBOL, "interval": TIMEFRAME}
-        info.subscribe(subscription, on_candle_update)
-        logging.info(f"Successfully subscribed to {SYMBOL} {TIMEFRAME} websocket")
-    except Exception as e:
-        logging.error(f"Failed to subscribe to websocket: {str(e)}", exc_info=True)
-        print(f"ERROR: Failed to subscribe to websocket: {e}")
-        return
+    subscription = {"type": "candle", "coin": SYMBOL, "interval": TIMEFRAME}
+    info.subscribe(subscription, on_candle_update)
     
     print("Listening for updates... (Press Ctrl+C to stop)")
     last_heartbeat = time.time()
-    last_update_time = time.time()
-    
     while True:
         try:
             time.sleep(1)
-            
-            # Check for websocket disconnection (no updates for 60 seconds)
-            if latest_candle_cache and time.time() - last_update_time > 60:
-                logging.warning("No websocket updates received for 60 seconds - possible disconnection")
-                print("\nWARNING: Websocket may be disconnected - no updates received")
-                last_update_time = time.time()
-            
             # Optional: Print ticker price occasionally
             if latest_candle_cache:
-                last_update_time = time.time()
                 t_ms = latest_candle_cache['t']
                 dt_obj = datetime.datetime.fromtimestamp(t_ms/1000)
                 next_close = dt_obj + datetime.timedelta(minutes=5)
@@ -552,15 +507,9 @@ def main():
                 if time.time() - last_heartbeat > 60:
                     sys.stdout.write(f"\n[{time_str}] STATUS OK | Price: {latest_candle_cache['c']} | Active Trade: {'YES' if current_trade and current_trade.active else 'NO'}\n")
                     last_heartbeat = time.time()
-                    
         except KeyboardInterrupt:
-            logging.info("Bot stopped by user")
             print("\nExiting...")
             break
-        except Exception as e:
-            logging.error(f"Error in main loop: {str(e)}", exc_info=True)
-            print(f"\nERROR in main loop: {e}")
-            time.sleep(5)  # Wait before continuing
 
 if __name__ == "__main__":
     main()
